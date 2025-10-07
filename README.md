@@ -1,33 +1,38 @@
-# 🏡 Airbnb Price & Demand Analytics (Spark)
+# 🛒 Amazon Customer Reviews Analytics (Spark)
 
-Analyze Airbnb listings, calendar availability, and reviews to understand **pricing, demand seasonality, host behavior, and neighborhood patterns** using Apache Spark.
+Analyze **Amazon US product reviews** to uncover **sentiment trends**, **rating behavior**, and **helpfulness prediction** using **Apache Spark**.  
+This project leverages Spark’s distributed processing to perform large-scale **ETL, NLP, and Machine Learning** on millions of real-world customer reviews.
 
 ---
 
-## 📦 Datasets
+## 📦 Dataset
 
-We are using **two sources**:
+**Dataset:** [Amazon US Customer Reviews Dataset (Kaggle)](https://www.kaggle.com/datasets/cynthiarempel/amazon-us-customer-reviews-dataset)  
+*(Originally part of the AWS Open Data Registry)*
 
-1. **Inside Airbnb (Official Open Data)** – multiple cities, updated regularly  
-   👉 http://insideairbnb.com/get-the-data/  
+**Description:**  
+Over **130 million product reviews** from verified Amazon customers across multiple categories — including text, ratings, timestamps, and metadata.
 
-   - `listings.csv` → host info, price, amenities, room type, reviews count  
-   - `calendar.csv` → daily availability & price per listing  
-   - `reviews.csv` → review text, rating, date  
+**Key Columns:**
+- `review_id` → Unique identifier for each review  
+- `product_id` → ASIN (Amazon Standard Identification Number)  
+- `product_title` → Product name  
+- `star_rating` → Rating from 1–5  
+- `review_body` → Text review  
+- `helpful_votes` → Votes marking a review as helpful  
+- `product_category` → Product type (Electronics, Books, etc.)  
+- `review_date` → Date of the review  
 
-2. **Kaggle Airbnb Open Data (cleaner versions for prototyping)**  
-   - [Seattle Airbnb Open Data](https://www.kaggle.com/datasets/airbnb/seattle)  
-   - [Boston Airbnb Open Data](https://www.kaggle.com/datasets/airbnb/boston)  
+**Why This Dataset:**  
+A **multi-million-row dataset** with both **textual** and **numerical** features — perfect for **parallelized ETL, joins, NLP, and ML pipelines** using Spark.
 
 ---
 
 ## 🎯 Project Goals
 
-- Perform **Exploratory Data Analysis (EDA)** on listings, calendar, and reviews  
-- Identify **price patterns and seasonality** across neighborhoods and room types  
-- Train a **baseline ML model** (Spark MLlib) to predict nightly prices  
-- (Optional) Explore **reviews text** for sentiment or rating prediction  
-
----
-
-
+- Perform **Exploratory Data Analysis (EDA)** on reviews and ratings  
+- Discover **sentiment trends** across product categories and years  
+- Analyze **correlation between review length and rating**  
+- Predict **helpful vs. non-helpful** reviews using **Spark MLlib**  
+- Build **classification and regression models** for review analysis  
+- Visualize **yearly trends**, **category insights**, and **sentiment distributions**
