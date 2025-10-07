@@ -1,5 +1,9 @@
-data/raw/
-data/sample/
+data/raw/*
+!data/raw/.gitkeep
+
+data/sample/*
+!data/sample/.gitkeep
+
 *.parquet
 *.csv
 .ipynb_checkpoints/
