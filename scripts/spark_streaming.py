@@ -1,101 +1,68 @@
-import os
-import time
 from pyspark.sql import SparkSession
+from pyspark.sql.functions import from_json, col
 from pyspark.sql.types import StructType, StringType, IntegerType
-from pyspark.sql.functions import from_json, col, current_timestamp
 
-# ==============================================================
-# ⚙️ Absolute Hadoop-free Spark session
-# ==============================================================
-
-os.environ.pop("HADOOP_HOME", None)
-os.environ.pop("HADOOP_CONF_DIR", None)
-os.environ["SPARK_LOCAL_DIRS"] = r"D:\spark_local_tmp"
-os.environ["SPARK_LOCAL_IP"] = "127.0.0.1"
-
+# -----------------------------
+# 1. SPARK SESSION WITH KAFKA SUPPORT
+# -----------------------------
 spark = (
     SparkSession.builder
-    .appName("AmazonReviewStreaming_HadoopFree")
+    .appName("AmazonReviewsStreaming")
     .master("local[*]")
-    .config("spark.sql.shuffle.partitions", "1")
-    .config("spark.sql.warehouse.dir", r"D:\spark_local_tmp\warehouse")
-    .config("spark.driver.extraJavaOptions", "-Djava.library.path=")
-    .config("spark.hadoop.fs.file.impl", "org.apache.hadoop.fs.RawLocalFileSystem")
-    .config("spark.sql.streaming.checkpointLocation", r"D:\spark_local_tmp\checkpoints")
+    .config("spark.jars.packages",
+            "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1,"
+            "org.apache.kafka:kafka-clients:3.7.0")
+    .config("spark.streaming.stopGracefullyOnShutdown", "true")
     .getOrCreate()
 )
 
-spark.sparkContext.setLogLevel("ERROR")
-print("✅ Spark Streaming session started in Hadoop-FREE mode!\n")
+spark.sparkContext.setLogLevel("WARN")
 
-# ==============================================================
-# Schema
-# ==============================================================
+print("🚀 Spark Streaming Consumer Started...\n")
 
-schema = (
-    StructType()
-    .add("product_id", StringType())
-    .add("product_title", StringType())
-    .add("star_rating", IntegerType())
-    .add("review_body", StringType())
-    .add("verified_purchase", StringType())
+# -----------------------------
+# 2. SCHEMA FOR INCOMING JSON
+# -----------------------------
+schema = StructType() \
+    .add("marketplace", StringType()) \
+    .add("customer_id", StringType()) \
+    .add("review_id", StringType()) \
+    .add("product_id", StringType()) \
+    .add("product_parent", StringType()) \
+    .add("product_title", StringType()) \
+    .add("star_rating", IntegerType()) \
+    .add("review_body", StringType()) \
     .add("review_date", StringType())
-    .add("product_category", StringType())
-)
 
-# ==============================================================
-# Socket stream
-# ==============================================================
 
-raw_df = (
-    spark.readStream.format("socket")
-    .option("host", "localhost")
-    .option("port", 9999)
+# -----------------------------
+# 3. READ STREAM FROM KAFKA
+# -----------------------------
+df_raw = (
+    spark.readStream
+    .format("kafka")
+    .option("kafka.bootstrap.servers", "localhost:9092")
+    .option("subscribe", "amazon_reviews")
+    .option("startingOffsets", "earliest")
     .load()
 )
 
-json_df = (
-    raw_df.select(from_json(col("value"), schema).alias("data"))
-    .select("data.*")
-    .withColumn("timestamp", current_timestamp())
-)
+# Convert binary to string
+df_str = df_raw.selectExpr("CAST(value AS STRING) as json")
 
-agg_df = (
-    json_df.groupBy("product_category")
-    .agg({"star_rating": "avg", "*": "count"})
-    .withColumnRenamed("avg(star_rating)", "avg_rating")
-    .withColumnRenamed("count(1)", "review_count")
-)
+# Parse nested JSON
+df_parsed = df_str.select(from_json(col("json"), schema).alias("data")).select("data.*")
 
-# ==============================================================
-# Custom foreachBatch writer (pure Python)
-# ==============================================================
 
-def process_batch(batch_df, batch_id):
-    out_dir = r"D:\spark_output_batches"
-    os.makedirs(out_dir, exist_ok=True)
-    out_file = f"{out_dir}\\batch_{batch_id}.csv"
-
-    if batch_df.count() > 0:
-        pdf = batch_df.toPandas()
-        pdf.to_csv(out_file, index=False, encoding="utf-8")
-        print(f"\n💾 Batch {batch_id} written to {out_file}")
-        print(pdf)
-    else:
-        print(f"\n⚠️ Empty batch {batch_id}")
-
+# -----------------------------
+# 4. WRITE TO CONSOLE (TEST)
+# -----------------------------
 query = (
-    agg_df.writeStream
-    .outputMode("complete")
-    .foreachBatch(process_batch)
-    .trigger(processingTime="5 seconds")
+    df_parsed.writeStream
+    .format("console")
+    .option("truncate", False)
+    .outputMode("append")
     .start()
 )
 
-try:
-    while query.isActive:
-        time.sleep(5)
-except KeyboardInterrupt:
-    print("\n🛑 Stopping stream.")
-    query.stop()
-    spark.stop()
+query.awaitTermination()
