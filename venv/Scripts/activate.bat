@@ -8,7 +8,7 @@ if defined _OLD_CODEPAGE (
     "%SystemRoot%\System32\chcp.com" 65001 > nul
 )
 
-set VIRTUAL_ENV=D:\old data\DESKTOP\Amazon_Analytics\Amazon-Customer-Reviews-Analytics\venv
+set VIRTUAL_ENV=C:\Users\butta\OneDrive\Desktop\Cloud_Project\Amazon-Customer-Reviews-Analytics\venv
 
 if not defined PROMPT set PROMPT=$P$G
 
