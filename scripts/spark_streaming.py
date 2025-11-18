@@ -1,68 +1,101 @@
+import os
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import from_json, col
-from pyspark.sql.types import StructType, StringType, IntegerType
+from pyspark.sql.functions import col, split, when
+from functools import reduce
 
-# -----------------------------
-# 1. SPARK SESSION WITH KAFKA SUPPORT
-# -----------------------------
-spark = (
-    SparkSession.builder
-    .appName("AmazonReviewsStreaming")
-    .master("local[*]")
-    .config("spark.jars.packages",
-            "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1,"
-            "org.apache.kafka:kafka-clients:3.7.0")
-    .config("spark.streaming.stopGracefullyOnShutdown", "true")
+# Folder paths
+INPUT_FOLDER = "data/stream_input/"
+OUTPUT_CSV = "data/output_csv/"
+OUTPUT_PARQUET = "data/output_parquet/"
+
+# Ensure folders exist
+os.makedirs(INPUT_FOLDER, exist_ok=True)
+os.makedirs(OUTPUT_CSV, exist_ok=True)
+os.makedirs(OUTPUT_PARQUET, exist_ok=True)
+
+# Start Spark
+spark = SparkSession.builder \
+    .appName("Amazon Reviews - File Streaming Pipeline") \
     .getOrCreate()
-)
 
 spark.sparkContext.setLogLevel("WARN")
 
-print("🚀 Spark Streaming Consumer Started...\n")
+print("==============================================")
+print(" Spark Streaming Started...")
+print(f" Watching folder: {INPUT_FOLDER}")
+print("==============================================\n")
 
-# -----------------------------
-# 2. SCHEMA FOR INCOMING JSON
-# -----------------------------
-schema = StructType() \
-    .add("marketplace", StringType()) \
-    .add("customer_id", StringType()) \
-    .add("review_id", StringType()) \
-    .add("product_id", StringType()) \
-    .add("product_parent", StringType()) \
-    .add("product_title", StringType()) \
-    .add("star_rating", IntegerType()) \
-    .add("review_body", StringType()) \
-    .add("review_date", StringType())
+# ----------------------------------------------------------------------
+# 1. READ STREAMING TEXT FILES
+# ----------------------------------------------------------------------
 
+raw_stream = spark.readStream \
+    .format("text") \
+    .load(INPUT_FOLDER)
 
-# -----------------------------
-# 3. READ STREAM FROM KAFKA
-# -----------------------------
-df_raw = (
-    spark.readStream
-    .format("kafka")
-    .option("kafka.bootstrap.servers", "localhost:9092")
-    .option("subscribe", "amazon_reviews")
-    .option("startingOffsets", "earliest")
-    .load()
+# ----------------------------------------------------------------------
+# 2. SPLIT TEXT → STRUCTURED COLUMNS
+# Format: product_id | rating | review_text
+# ----------------------------------------------------------------------
+
+json_df = raw_stream.select(
+    split(col("value"), "\\|")[0].alias("product_id"),
+    split(col("value"), "\\|")[1].cast("int").alias("rating"),
+    split(col("value"), "\\|")[2].alias("review_text")
 )
 
-# Convert binary to string
-df_str = df_raw.selectExpr("CAST(value AS STRING) as json")
+# ----------------------------------------------------------------------
+# 3. SENTIMENT ANALYSIS (WORKING VERSION)
+# ----------------------------------------------------------------------
 
-# Parse nested JSON
-df_parsed = df_str.select(from_json(col("json"), schema).alias("data")).select("data.*")
+positive_words = ["good", "great", "excellent", "love", "amazing", "awesome", "fantastic"]
+negative_words = ["bad", "terrible", "worst", "hate", "awful", "poor"]
 
+# Create OR conditions
+positive_condition = reduce(lambda a, b: a | b, [col("review_text").rlike(w) for w in positive_words])
+negative_condition = reduce(lambda a, b: a | b, [col("review_text").rlike(w) for w in negative_words])
 
-# -----------------------------
-# 4. WRITE TO CONSOLE (TEST)
-# -----------------------------
-query = (
-    df_parsed.writeStream
-    .format("console")
-    .option("truncate", False)
-    .outputMode("append")
+sentiment_df = json_df.withColumn(
+    "sentiment",
+    when(positive_condition, "positive")
+    .when(negative_condition, "negative")
+    .otherwise("neutral")
+)
+
+# ----------------------------------------------------------------------
+# 4. WRITE STREAM TO CONSOLE (LIVE OUTPUT)
+# ----------------------------------------------------------------------
+
+console_query = sentiment_df.writeStream \
+    .outputMode("append") \
+    .format("console") \
+    .option("truncate", False) \
     .start()
-)
 
-query.awaitTermination()
+# ----------------------------------------------------------------------
+# 5. WRITE STREAM TO CSV
+# ----------------------------------------------------------------------
+
+csv_query = sentiment_df.writeStream \
+    .outputMode("append") \
+    .format("csv") \
+    .option("header", True) \
+    .option("path", OUTPUT_CSV) \
+    .option("checkpointLocation", OUTPUT_CSV + "_checkpoint") \
+    .start()
+
+# ----------------------------------------------------------------------
+# 6. WRITE STREAM TO PARQUET
+# ----------------------------------------------------------------------
+
+parquet_query = sentiment_df.writeStream \
+    .outputMode("append") \
+    .format("parquet") \
+    .option("path", OUTPUT_PARQUET) \
+    .option("checkpointLocation", OUTPUT_PARQUET + "_checkpoint") \
+    .start()
+
+# Wait for stream to run forever
+console_query.awaitTermination()
+csv_query.awaitTermination()
+parquet_query.awaitTermination()
