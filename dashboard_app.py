@@ -1,147 +1,1535 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-from textblob import TextBlob
+import plotly.graph_objects as go
 import numpy as np
+import joblib
+import re
+import os
+from datetime import datetime, timedelta
+from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
+from sklearn.decomposition import LatentDirichletAllocation
 
 # -----------------------------------------------------------
 # Page Config
 # -----------------------------------------------------------
 st.set_page_config(page_title="Amazon Product Worthiness Predictor", layout="wide")
-st.title("📊 Amazon Product Worthiness & Review Insights Dashboard")
 
 # -----------------------------------------------------------
-# Load Data
+# Load ML Models (cached)
+# -----------------------------------------------------------
+@st.cache_resource
+def load_ml_models():
+    models = {}
+    try:
+        if os.path.exists("models/sentiment_model.pkl"):
+            models["sentiment_model"] = joblib.load("models/sentiment_model.pkl")
+            models["tfidf_vectorizer"] = joblib.load("models/tfidf_vectorizer.pkl")
+        if os.path.exists("models/rating_regression.pkl"):
+            models["rating_model"] = joblib.load("models/rating_regression.pkl")
+            models["rating_vectorizer"] = joblib.load("models/rating_vectorizer.pkl")
+        if os.path.exists("ml/models/product_demand_model.pkl"):
+            models["demand_model"] = joblib.load("ml/models/product_demand_model.pkl")
+            models["demand_scaler"] = joblib.load("ml/models/product_demand_scaler.pkl")
+    except Exception as e:
+        st.warning(f"Could not load some ML models: {e}")
+    return models
+
+ml_models = load_ml_models()
+
+# -----------------------------------------------------------
+# Load Data (with pre-computed sentiment for speed)
 # -----------------------------------------------------------
 @st.cache_data
 def load_data():
-    df = pd.read_parquet("data/sample/amazon_reviews_cleaned.parquet")
+    df = pd.read_parquet("data/sample/amazon_reviews_sample.parquet")
     df["review_date"] = pd.to_datetime(df["review_date"], errors="coerce")
+    
+    # Use a smaller sample for faster loading (50k rows)
+    if len(df) > 50000:
+        df = df.sample(n=50000, random_state=42)
+    
+    # Quick sentiment based on star_rating
+    df["sentiment_score"] = df["star_rating"].apply(lambda r: (r - 3) / 2)
+    df["sentiment"] = df["star_rating"].apply(
+        lambda r: "Positive" if r >= 4 else "Negative" if r <= 2 else "Neutral"
+    )
     return df
 
 df = load_data()
 
 # -----------------------------------------------------------
-# Sentiment Calculation
+# Helper Functions
 # -----------------------------------------------------------
-if "sentiment_score" not in df.columns:
-    st.info("⚙️ Calculating sentiment scores, please wait...")
-    df["sentiment_score"] = df["review_body"].astype(str).apply(lambda x: TextBlob(x).sentiment.polarity)
-    df["sentiment"] = df["sentiment_score"].apply(lambda s: "Positive" if s > 0 else "Negative" if s < 0 else "Neutral")
+def clean_text(text):
+    text = str(text).lower()
+    text = re.sub(r"[^a-zA-Z ]", "", text)
+    return text
+
+def predict_sentiment(text, models):
+    if "sentiment_model" not in models or "tfidf_vectorizer" not in models:
+        return None, None
+    try:
+        clean = clean_text(text)
+        vec = models["tfidf_vectorizer"].transform([clean])
+        pred = models["sentiment_model"].predict(vec)[0]
+        # Get probability if available
+        try:
+            proba = models["sentiment_model"].predict_proba(vec)[0]
+            return pred, proba
+        except:
+            return pred, None
+    except:
+        return None, None
+
+def predict_rating(text, models):
+    if "rating_model" not in models or "rating_vectorizer" not in models:
+        return None
+    try:
+        clean = clean_text(text)
+        vec = models["rating_vectorizer"].transform([clean])
+        # Handle feature mismatch
+        expected = getattr(models["rating_model"], "n_features_in_", vec.shape[1])
+        if vec.shape[1] != expected:
+            return None
+        return round(float(models["rating_model"].predict(vec)[0]), 2)
+    except:
+        return None
+
+def rule_based_sentiment(text):
+    """Simple rule-based sentiment analysis"""
+    text_lower = text.lower()
+    positive_words = ["good", "great", "excellent", "love", "amazing", "awesome", "fantastic", "best", "perfect", "wonderful", "happy", "satisfied", "recommend"]
+    negative_words = ["bad", "terrible", "worst", "hate", "awful", "poor", "horrible", "disappointed", "broken", "waste", "useless", "defective", "return"]
+    neutral_words = ["okay", "ok", "fine", "average", "decent", "alright"]
+    
+    pos_count = sum(1 for w in positive_words if w in text_lower)
+    neg_count = sum(1 for w in negative_words if w in text_lower)
+    neu_count = sum(1 for w in neutral_words if w in text_lower)
+    
+    if pos_count > neg_count + neu_count:
+        return "positive", pos_count / (pos_count + neg_count + neu_count + 1)
+    elif neg_count > pos_count + neu_count:
+        return "negative", neg_count / (pos_count + neg_count + neu_count + 1)
+    else:
+        return "neutral", 0.5
+
+def extract_topics_from_text(texts, n_topics=5, n_words=10):
+    """Extract topics using LDA"""
+    try:
+        vectorizer = CountVectorizer(stop_words="english", max_features=1000)
+        X = vectorizer.fit_transform(texts)
+        
+        lda = LatentDirichletAllocation(n_components=n_topics, random_state=42, learning_method='online')
+        lda.fit(X)
+        
+        feature_names = vectorizer.get_feature_names_out()
+        topics = {}
+        for idx, topic in enumerate(lda.components_):
+            top_words = [feature_names[i] for i in topic.argsort()[:-n_words-1:-1]]
+            topics[f"Topic {idx+1}"] = top_words
+        return topics
+    except:
+        return {}
+
+def calculate_text_features(text):
+    """Extract features from text for analysis"""
+    text = str(text)
+    return {
+        "word_count": len(text.split()),
+        "char_count": len(text),
+        "avg_word_length": np.mean([len(w) for w in text.split()]) if text.split() else 0,
+        "sentence_count": text.count('.') + text.count('!') + text.count('?'),
+        "exclamation_count": text.count('!'),
+        "question_count": text.count('?'),
+        "uppercase_ratio": sum(1 for c in text if c.isupper()) / max(len(text), 1)
+    }
+
+def calculate_worthiness(avg_rating, avg_sentiment):
+    return (0.7 * (avg_rating / 5) + 0.3 * ((avg_sentiment + 1) / 2)) * 100
 
 # -----------------------------------------------------------
-# Sidebar: Category Selector
+# Sidebar Navigation
 # -----------------------------------------------------------
+st.sidebar.title("🛒 Amazon Analytics")
+page = st.sidebar.radio(
+    "Navigate",
+    ["📊 Overview Dashboard", "🔍 Product Search & Analysis", "🤖 ML Models Comparison", "📡 Streaming Simulation"]
+)
+
+# -----------------------------------------------------------
+# Sidebar: Category Filter (global)
+# -----------------------------------------------------------
+st.sidebar.markdown("---")
 st.sidebar.header("🔍 Filter Options")
 categories = ["All"] + sorted(df["product_category"].dropna().unique().tolist())
 selected_category = st.sidebar.selectbox("Select Product Category", categories)
 
 if selected_category != "All":
-    df = df[df["product_category"] == selected_category]
+    filtered_df = df[df["product_category"] == selected_category]
+else:
+    filtered_df = df
 
-# -----------------------------------------------------------
-# Product-level Aggregation & Worthiness
-# -----------------------------------------------------------
-st.markdown("### 💡 Product-Level Worthiness Analysis")
-
+# Pre-compute product summary
 product_summary = (
-    df.groupby("product_title")
+    filtered_df.groupby("product_title")
     .agg(
+        product_id=("product_id", "first"),
         avg_rating=("star_rating", "mean"),
         review_count=("review_body", "count"),
         avg_sentiment=("sentiment_score", "mean"),
+        category=("product_category", "first"),
     )
     .reset_index()
 )
-
-# Normalize worthiness score (weighted mix of rating & sentiment)
-product_summary["worthiness_score"] = (
-    0.7 * (product_summary["avg_rating"] / 5) + 0.3 * ((product_summary["avg_sentiment"] + 1) / 2)
+product_summary["worthiness_score"] = product_summary.apply(
+    lambda row: calculate_worthiness(row["avg_rating"], row["avg_sentiment"]), axis=1
 )
-product_summary["worthiness_score"] = product_summary["worthiness_score"] * 100
 
-# Top 5 best & worst products
-top_products = product_summary.sort_values("worthiness_score", ascending=False).head(5)
-low_products = product_summary.sort_values("worthiness_score", ascending=True).head(5)
-
-# -----------------------------------------------------------
-# Overview Metrics
-# -----------------------------------------------------------
-st.markdown("### 📈 Overview Metrics")
-col1, col2, col3 = st.columns(3)
-col1.metric("Average Rating", round(df["star_rating"].mean(), 2))
-col2.metric("Total Reviews", len(df))
-col3.metric("Average Worthiness (%)", round(product_summary["worthiness_score"].mean(), 2))
-
-# -----------------------------------------------------------
-# Visualization 1: Worthiness Distribution
-# -----------------------------------------------------------
-st.markdown("### 🏅 Product Worthiness Distribution")
-fig_worthiness = px.scatter(
-    product_summary,
-    x="avg_rating",
-    y="avg_sentiment",
-    size="review_count",
-    color="worthiness_score",
-    hover_name="product_title",
-    title="Relationship Between Rating, Sentiment & Worthiness",
-    color_continuous_scale="Viridis",
-)
-st.plotly_chart(fig_worthiness, use_container_width=True)
-
-# -----------------------------------------------------------
-# Visualization 2: Top 5 Best and Worst Products
-# -----------------------------------------------------------
-st.markdown("### 🥇 Top 5 Best & 🚫 Worst Products")
-
-col1, col2 = st.columns(2)
-
-with col1:
-    st.subheader("Top 5 Best Products")
-    fig_best = px.bar(
-        top_products,
-        x="worthiness_score",
-        y="product_title",
-        orientation="h",
-        text="avg_rating",
+# ============================================================
+# PAGE 1: OVERVIEW DASHBOARD
+# ============================================================
+if page == "📊 Overview Dashboard":
+    st.title("📊 Amazon Product Worthiness & Review Insights Dashboard")
+    
+    # Overview Metrics
+    st.markdown("### 📈 Overview Metrics")
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Average Rating", f"{filtered_df['star_rating'].mean():.2f} ⭐")
+    col2.metric("Total Reviews", f"{len(filtered_df):,}")
+    col3.metric("Unique Products", f"{filtered_df['product_title'].nunique():,}")
+    col4.metric("Avg Worthiness", f"{product_summary['worthiness_score'].mean():.1f}%")
+    
+    # Worthiness Distribution
+    st.markdown("### 🏅 Product Worthiness Distribution")
+    fig_worthiness = px.scatter(
+        product_summary.head(500),  # Limit for performance
+        x="avg_rating",
+        y="avg_sentiment",
+        size="review_count",
         color="worthiness_score",
-        color_continuous_scale="Greens",
-        title="Top 5 Products by Worthiness",
+        hover_name="product_title",
+        title="Rating vs Sentiment (bubble size = review count)",
+        color_continuous_scale="Viridis",
     )
-    st.plotly_chart(fig_best, use_container_width=True)
-    st.dataframe(top_products[["product_title", "avg_rating", "avg_sentiment", "worthiness_score"]])
+    st.plotly_chart(fig_worthiness, use_container_width=True)
+    
+    # Top & Worst Products
+    st.markdown("### 🥇 Top 5 Best & 🚫 Worst Products")
+    col1, col2 = st.columns(2)
+    
+    top_products = product_summary.nlargest(5, "worthiness_score")
+    low_products = product_summary.nsmallest(5, "worthiness_score")
+    
+    with col1:
+        st.subheader("🏆 Top 5 Best Products")
+        fig_best = px.bar(
+            top_products, x="worthiness_score", y="product_title",
+            orientation="h", color="worthiness_score",
+            color_continuous_scale="Greens", text_auto=".1f"
+        )
+        fig_best.update_layout(yaxis={'categoryorder':'total ascending'})
+        st.plotly_chart(fig_best, use_container_width=True)
+    
+    with col2:
+        st.subheader("⚠️ Bottom 5 Products")
+        fig_worst = px.bar(
+            low_products, x="worthiness_score", y="product_title",
+            orientation="h", color="worthiness_score",
+            color_continuous_scale="Reds", text_auto=".1f"
+        )
+        fig_worst.update_layout(yaxis={'categoryorder':'total descending'})
+        st.plotly_chart(fig_worst, use_container_width=True)
+    
+    # Review Trend
+    st.markdown("### 📆 Review Trend Over Time")
+    trend_df = filtered_df.dropna(subset=["review_date"])
+    if len(trend_df) > 0:
+        monthly_trend = trend_df.groupby(trend_df["review_date"].dt.to_period("M")).size().reset_index(name="Review Count")
+        monthly_trend["review_date"] = monthly_trend["review_date"].astype(str)
+        fig_trend = px.line(monthly_trend, x="review_date", y="Review Count", markers=True)
+        st.plotly_chart(fig_trend, use_container_width=True)
 
-with col2:
-    st.subheader("Bottom 5 Products")
-    fig_worst = px.bar(
-        low_products,
-        x="worthiness_score",
-        y="product_title",
-        orientation="h",
-        text="avg_rating",
-        color="worthiness_score",
-        color_continuous_scale="Reds",
-        title="Lowest 5 Products by Worthiness",
+# ============================================================
+# PAGE 2: PRODUCT SEARCH & ANALYSIS
+# ============================================================
+elif page == "🔍 Product Search & Analysis":
+    st.title("🔍 Product Search & Detailed Analysis")
+    
+    # Search box with autocomplete
+    st.markdown("### 🔎 Search for a Product")
+    product_list = product_summary["product_title"].tolist()
+    
+    # Search input
+    search_query = st.text_input("Type product name to search:", "")
+    
+    # Filter products based on search
+    if search_query:
+        matching_products = [p for p in product_list if search_query.lower() in p.lower()][:20]
+    else:
+        matching_products = product_list[:20]
+    
+    selected_product = st.selectbox(
+        "Select a product from results:",
+        options=matching_products if matching_products else ["No products found"],
+        key="product_selector"
     )
-    st.plotly_chart(fig_worst, use_container_width=True)
-    st.dataframe(low_products[["product_title", "avg_rating", "avg_sentiment", "worthiness_score"]])
+    
+    if selected_product and selected_product != "No products found":
+        st.markdown("---")
+        st.markdown(f"## 📦 {selected_product}")
+        
+        # Get product data
+        product_data = product_summary[product_summary["product_title"] == selected_product].iloc[0]
+        product_reviews = filtered_df[filtered_df["product_title"] == selected_product]
+        
+        # Key Metrics
+        col1, col2, col3, col4 = st.columns(4)
+        
+        worthiness = product_data["worthiness_score"]
+        worthiness_color = "green" if worthiness >= 70 else "orange" if worthiness >= 50 else "red"
+        
+        col1.metric("⭐ Average Rating", f"{product_data['avg_rating']:.2f}/5")
+        col2.metric("📝 Total Reviews", f"{int(product_data['review_count']):,}")
+        col3.metric("😊 Avg Sentiment", f"{product_data['avg_sentiment']:.2f}")
+        col4.metric("🎯 Worthiness Score", f"{worthiness:.1f}%")
+        
+        # Worthiness Gauge
+        st.markdown("### 🎯 Product Worthiness Gauge")
+        fig_gauge = go.Figure(go.Indicator(
+            mode="gauge+number+delta",
+            value=worthiness,
+            domain={'x': [0, 1], 'y': [0, 1]},
+            title={'text': "Worthiness Score", 'font': {'size': 24}},
+            delta={'reference': 70, 'increasing': {'color': "green"}, 'decreasing': {'color': "red"}},
+            gauge={
+                'axis': {'range': [0, 100], 'tickwidth': 1},
+                'bar': {'color': "darkblue"},
+                'steps': [
+                    {'range': [0, 40], 'color': "#ff4444"},
+                    {'range': [40, 70], 'color': "#ffaa00"},
+                    {'range': [70, 100], 'color': "#44ff44"}
+                ],
+                'threshold': {
+                    'line': {'color': "black", 'width': 4},
+                    'thickness': 0.75,
+                    'value': worthiness
+                }
+            }
+        ))
+        fig_gauge.update_layout(height=300)
+        st.plotly_chart(fig_gauge, use_container_width=True)
+        
+        # Rating Distribution
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("### ⭐ Rating Distribution")
+            rating_dist = product_reviews["star_rating"].value_counts().sort_index()
+            fig_rating = px.bar(
+                x=rating_dist.index, y=rating_dist.values,
+                labels={"x": "Star Rating", "y": "Count"},
+                color=rating_dist.index,
+                color_continuous_scale="YlOrRd"
+            )
+            st.plotly_chart(fig_rating, use_container_width=True)
+        
+        with col2:
+            st.markdown("### 😊 Sentiment Breakdown")
+            sentiment_dist = product_reviews["sentiment"].value_counts()
+            fig_sentiment = px.pie(
+                values=sentiment_dist.values,
+                names=sentiment_dist.index,
+                color=sentiment_dist.index,
+                color_discrete_map={"Positive": "green", "Neutral": "gray", "Negative": "red"}
+            )
+            st.plotly_chart(fig_sentiment, use_container_width=True)
+        
+        # Review Timeline
+        st.markdown("### 📅 Review Timeline for This Product")
+        if len(product_reviews.dropna(subset=["review_date"])) > 0:
+            timeline = product_reviews.dropna(subset=["review_date"])
+            timeline_agg = timeline.groupby(timeline["review_date"].dt.to_period("M")).agg({
+                "star_rating": "mean",
+                "review_body": "count"
+            }).reset_index()
+            timeline_agg.columns = ["Month", "Avg Rating", "Review Count"]
+            timeline_agg["Month"] = timeline_agg["Month"].astype(str)
+            
+            fig_timeline = go.Figure()
+            fig_timeline.add_trace(go.Bar(
+                x=timeline_agg["Month"], y=timeline_agg["Review Count"],
+                name="Review Count", yaxis="y", marker_color="lightblue"
+            ))
+            fig_timeline.add_trace(go.Scatter(
+                x=timeline_agg["Month"], y=timeline_agg["Avg Rating"],
+                name="Avg Rating", yaxis="y2", line=dict(color="orange", width=3),
+                mode="lines+markers"
+            ))
+            fig_timeline.update_layout(
+                yaxis=dict(title="Review Count"),
+                yaxis2=dict(title="Avg Rating", overlaying="y", side="right", range=[1, 5]),
+                legend=dict(x=0.01, y=0.99)
+            )
+            st.plotly_chart(fig_timeline, use_container_width=True)
+        
+        # Sample Reviews
+        st.markdown("### 📝 Sample Reviews")
+        sample_reviews = product_reviews[["star_rating", "review_body", "sentiment"]].head(10)
+        st.dataframe(sample_reviews, use_container_width=True)
+        
+        # Comparison with Category
+        st.markdown("### 📊 Comparison with Category Average")
+        category = product_data.get("category", selected_category)
+        if category and category != "All":
+            cat_df = df[df["product_category"] == category]
+            cat_avg_rating = cat_df["star_rating"].mean()
+            cat_avg_sentiment = cat_df["sentiment_score"].mean()
+            cat_worthiness = calculate_worthiness(cat_avg_rating, cat_avg_sentiment)
+            
+            comparison_data = pd.DataFrame({
+                "Metric": ["Avg Rating", "Avg Sentiment", "Worthiness %"],
+                "This Product": [product_data["avg_rating"], product_data["avg_sentiment"], worthiness],
+                "Category Average": [cat_avg_rating, cat_avg_sentiment, cat_worthiness]
+            })
+            
+            fig_compare = go.Figure()
+            fig_compare.add_trace(go.Bar(name="This Product", x=comparison_data["Metric"], y=comparison_data["This Product"], marker_color="blue"))
+            fig_compare.add_trace(go.Bar(name="Category Average", x=comparison_data["Metric"], y=comparison_data["Category Average"], marker_color="gray"))
+            fig_compare.update_layout(barmode="group")
+            st.plotly_chart(fig_compare, use_container_width=True)
+
+# ============================================================
+# PAGE 3: ML MODELS COMPARISON (COMPREHENSIVE PAGE)
+# ============================================================
+elif page == "🤖 ML Models Comparison":
+    st.title("🤖 Machine Learning Models Comparison")
+    
+    st.markdown("""
+    This page showcases **ALL ML models** in the project and compares their predictions.
+    Enter a review text to see predictions from multiple models side by side!
+    """)
+    
+    # Check available models
+    st.markdown("### 📦 Available ML Models")
+    
+    model_status = {
+        "Sentiment Classifier (LogisticRegression)": "sentiment_model" in ml_models,
+        "Rating Predictor (LinearRegression)": "rating_model" in ml_models,
+        "Rule-Based Sentiment": True,  # Always available
+        "Topic Modeling (LDA)": True,  # Can run on-demand
+        "Text Feature Analyzer": True,  # Always available
+    }
+    
+    cols = st.columns(5)
+    for i, (model_name, available) in enumerate(model_status.items()):
+        with cols[i % 5]:
+            if available:
+                st.success(f"✅ {model_name}")
+            else:
+                st.error(f"❌ {model_name}")
+    
+    st.markdown("---")
+    
+    # Input Section
+    st.markdown("### ✍️ Enter Review Text for Multi-Model Prediction")
+    
+    user_review = st.text_area(
+        "Type or paste a product review:",
+        placeholder="This product is amazing! Great quality and fast shipping. The material feels premium and it works exactly as described. Highly recommend!",
+        height=150,
+        key="ml_review_input"
+    )
+    
+    # Sample reviews for quick testing
+    st.markdown("**Quick Test Reviews:**")
+    sample_cols = st.columns(3)
+    sample_reviews = [
+        "This product is amazing! Best purchase ever, highly recommend!",
+        "Terrible quality, broke after one day. Complete waste of money.",
+        "It's okay, nothing special. Does the job but could be better."
+    ]
+    
+    for i, sample in enumerate(sample_reviews):
+        with sample_cols[i]:
+            if st.button(f"{'😊' if i==0 else '😞' if i==1 else '😐'} Sample {i+1}", key=f"sample_{i}"):
+                st.session_state.user_review = sample
+    
+    if "user_review" in st.session_state and not user_review:
+        user_review = st.session_state.user_review
+    
+    if st.button("🔮 Run All Models", type="primary") or user_review:
+        if user_review and user_review.strip():
+            st.markdown("---")
+            st.markdown("## 📊 Multi-Model Prediction Results")
+            
+            # Collect all predictions
+            predictions = {}
+            
+            # 1. ML Sentiment Model
+            ml_sentiment, ml_proba = predict_sentiment(user_review, ml_models)
+            predictions["ML Sentiment"] = ml_sentiment if ml_sentiment else "N/A"
+            
+            # 2. ML Rating Model
+            ml_rating = predict_rating(user_review, ml_models)
+            predictions["ML Rating"] = ml_rating if ml_rating else "N/A"
+            
+            # 3. Rule-Based Sentiment
+            rule_sentiment, rule_confidence = rule_based_sentiment(user_review)
+            predictions["Rule-Based Sentiment"] = rule_sentiment
+            
+            # 4. Text Features
+            text_features = calculate_text_features(user_review)
+            
+            # Display Results in Columns
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                st.markdown("### 🧠 ML Sentiment Model")
+                st.markdown("*Logistic Regression with TF-IDF*")
+                if ml_sentiment:
+                    emoji = "😊" if ml_sentiment == "positive" else "😞" if ml_sentiment == "negative" else "😐"
+                    color = "green" if ml_sentiment == "positive" else "red" if ml_sentiment == "negative" else "gray"
+                    st.markdown(f"**Prediction:** :{color}[{emoji} {ml_sentiment.upper()}]")
+                    
+                    if ml_proba is not None:
+                        # Create confidence pie chart
+                        try:
+                            classes = ml_models["sentiment_model"].classes_
+                            fig_conf = px.pie(
+                                values=ml_proba * 100,
+                                names=classes,
+                                title="Confidence Distribution",
+                                color=classes,
+                                color_discrete_map={"positive": "#2ecc71", "neutral": "#95a5a6", "negative": "#e74c3c"}
+                            )
+                            fig_conf.update_layout(height=300)
+                            st.plotly_chart(fig_conf, use_container_width=True)
+                        except:
+                            st.write(f"Confidence: {max(ml_proba)*100:.1f}%")
+                else:
+                    st.warning("Model not available. Train with: `python ml/sentiment_ml.py`")
+            
+            with col2:
+                st.markdown("### 📈 ML Rating Predictor")
+                st.markdown("*Linear Regression with TF-IDF*")
+                if ml_rating:
+                    # Rating gauge
+                    fig_rating = go.Figure(go.Indicator(
+                        mode="gauge+number",
+                        value=ml_rating,
+                        domain={'x': [0, 1], 'y': [0, 1]},
+                        title={'text': "Predicted Rating"},
+                        gauge={
+                            'axis': {'range': [1, 5]},
+                            'bar': {'color': "darkblue"},
+                            'steps': [
+                                {'range': [1, 2], 'color': "#e74c3c"},
+                                {'range': [2, 3], 'color': "#f39c12"},
+                                {'range': [3, 4], 'color': "#f1c40f"},
+                                {'range': [4, 5], 'color': "#2ecc71"}
+                            ]
+                        }
+                    ))
+                    fig_rating.update_layout(height=300)
+                    st.plotly_chart(fig_rating, use_container_width=True)
+                    st.markdown(f"**Predicted Rating:** ⭐ {ml_rating}/5")
+                else:
+                    st.warning("Model not available. Train with: `python ml/rating_regression.py`")
+            
+            with col3:
+                st.markdown("### 📜 Rule-Based Analysis")
+                st.markdown("*Keyword matching approach*")
+                emoji = "😊" if rule_sentiment == "positive" else "😞" if rule_sentiment == "negative" else "😐"
+                color = "green" if rule_sentiment == "positive" else "red" if rule_sentiment == "negative" else "gray"
+                st.markdown(f"**Prediction:** :{color}[{emoji} {rule_sentiment.upper()}]")
+                st.markdown(f"**Confidence:** {rule_confidence*100:.1f}%")
+                
+                # Show word analysis
+                st.markdown("**Keywords Found:**")
+                positive_words = ["good", "great", "excellent", "love", "amazing", "awesome", "fantastic", "best", "perfect", "wonderful", "happy", "satisfied", "recommend"]
+                negative_words = ["bad", "terrible", "worst", "hate", "awful", "poor", "horrible", "disappointed", "broken", "waste", "useless", "defective", "return"]
+                
+                found_pos = [w for w in positive_words if w in user_review.lower()]
+                found_neg = [w for w in negative_words if w in user_review.lower()]
+                
+                if found_pos:
+                    st.markdown(f"✅ Positive: {', '.join(found_pos)}")
+                if found_neg:
+                    st.markdown(f"❌ Negative: {', '.join(found_neg)}")
+                if not found_pos and not found_neg:
+                    st.markdown("😐 No strong keywords detected")
+            
+            # Text Features Analysis
+            st.markdown("---")
+            st.markdown("### 📝 Text Feature Analysis")
+            
+            feat_cols = st.columns(4)
+            with feat_cols[0]:
+                st.metric("📏 Word Count", text_features["word_count"])
+            with feat_cols[1]:
+                st.metric("📄 Character Count", text_features["char_count"])
+            with feat_cols[2]:
+                st.metric("📊 Avg Word Length", f"{text_features['avg_word_length']:.1f}")
+            with feat_cols[3]:
+                st.metric("🔤 Sentences", text_features["sentence_count"])
+            
+            feat_cols2 = st.columns(3)
+            with feat_cols2[0]:
+                st.metric("❗ Exclamations", text_features["exclamation_count"])
+            with feat_cols2[1]:
+                st.metric("❓ Questions", text_features["question_count"])
+            with feat_cols2[2]:
+                st.metric("🔠 Uppercase Ratio", f"{text_features['uppercase_ratio']*100:.1f}%")
+            
+            # Model Comparison Table
+            st.markdown("---")
+            st.markdown("### 📊 Model Comparison Table")
+            
+            comparison_data = pd.DataFrame({
+                "Model": ["ML Sentiment (LogReg)", "ML Rating (LinReg)", "Rule-Based Sentiment"],
+                "Prediction": [
+                    predictions["ML Sentiment"],
+                    f"⭐ {predictions['ML Rating']}/5" if predictions['ML Rating'] != "N/A" else "N/A",
+                    predictions["Rule-Based Sentiment"]
+                ],
+                "Type": ["Classification", "Regression", "Classification"],
+                "Method": ["TF-IDF + Logistic Regression", "TF-IDF + Linear Regression", "Keyword Matching"],
+                "Status": [
+                    "✅ Available" if ml_sentiment else "❌ Not Trained",
+                    "✅ Available" if ml_rating else "❌ Not Trained",
+                    "✅ Always Available"
+                ]
+            })
+            
+            st.dataframe(comparison_data, use_container_width=True, hide_index=True)
+            
+            # Model Agreement Analysis
+            st.markdown("### 🤝 Model Agreement Analysis")
+            
+            # Determine agreement
+            if ml_sentiment and rule_sentiment:
+                if ml_sentiment == rule_sentiment:
+                    st.success(f"✅ **Models Agree!** Both predict: **{ml_sentiment.upper()}**")
+                else:
+                    st.warning(f"⚠️ **Models Disagree!** ML: {ml_sentiment.upper()} vs Rule-Based: {rule_sentiment.upper()}")
+            
+            # Rating vs Sentiment consistency
+            if ml_rating and ml_sentiment:
+                expected_sentiment = "positive" if ml_rating >= 4 else "negative" if ml_rating <= 2 else "neutral"
+                if expected_sentiment == ml_sentiment:
+                    st.success(f"✅ Rating ({ml_rating}) and Sentiment ({ml_sentiment}) are **consistent**")
+                else:
+                    st.info(f"ℹ️ Rating ({ml_rating}) suggests '{expected_sentiment}' but sentiment model says '{ml_sentiment}'")
+    
+    # Batch Analysis Section
+    st.markdown("---")
+    st.markdown("### 📦 Batch Analysis - Analyze Multiple Reviews")
+    
+    batch_text = st.text_area(
+        "Enter multiple reviews (one per line):",
+        placeholder="This product is great!\nTerrible quality, don't buy.\nIt's okay, does the job.",
+        height=100,
+        key="batch_input"
+    )
+    
+    if st.button("🔄 Analyze Batch") and batch_text:
+        reviews = [r.strip() for r in batch_text.split('\n') if r.strip()]
+        
+        if reviews:
+            results = []
+            for review in reviews[:20]:  # Limit to 20 reviews
+                ml_sent, _ = predict_sentiment(review, ml_models)
+                ml_rat = predict_rating(review, ml_models)
+                rule_sent, _ = rule_based_sentiment(review)
+                
+                results.append({
+                    "Review": review[:50] + "..." if len(review) > 50 else review,
+                    "ML Sentiment": ml_sent if ml_sent else "N/A",
+                    "ML Rating": f"{ml_rat:.1f}" if ml_rat else "N/A",
+                    "Rule Sentiment": rule_sent
+                })
+            
+            results_df = pd.DataFrame(results)
+            st.dataframe(results_df, use_container_width=True, hide_index=True)
+            
+            # Batch summary pie charts
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                if "ML Sentiment" in results_df.columns:
+                    ml_counts = results_df["ML Sentiment"].value_counts()
+                    fig = px.pie(values=ml_counts.values, names=ml_counts.index, 
+                                title="ML Sentiment Distribution",
+                                color=ml_counts.index,
+                                color_discrete_map={"positive": "#2ecc71", "neutral": "#95a5a6", "negative": "#e74c3c", "N/A": "#bdc3c7"})
+                    st.plotly_chart(fig, use_container_width=True)
+            
+            with col2:
+                rule_counts = results_df["Rule Sentiment"].value_counts()
+                fig = px.pie(values=rule_counts.values, names=rule_counts.index,
+                            title="Rule-Based Sentiment Distribution",
+                            color=rule_counts.index,
+                            color_discrete_map={"positive": "#2ecc71", "neutral": "#95a5a6", "negative": "#e74c3c"})
+                st.plotly_chart(fig, use_container_width=True)
+    
+    # Topic Modeling Section
+    st.markdown("---")
+    st.markdown("### 🏷️ Topic Modeling (LDA)")
+    st.markdown("Discover common topics in product reviews using Latent Dirichlet Allocation")
+    
+    if st.button("🔍 Extract Topics from Dataset"):
+        with st.spinner("Running Topic Modeling..."):
+            sample_reviews = filtered_df["review_body"].dropna().head(5000).tolist()
+            clean_reviews = [clean_text(r) for r in sample_reviews if len(str(r)) > 20]
+            
+            if len(clean_reviews) > 100:
+                topics = extract_topics_from_text(clean_reviews, n_topics=5, n_words=10)
+                
+                if topics:
+                    st.success(f"✅ Extracted {len(topics)} topics from {len(clean_reviews)} reviews")
+                    
+                    for topic_name, words in topics.items():
+                        st.markdown(f"**{topic_name}:** {', '.join(words)}")
+                else:
+                    st.warning("Could not extract topics")
+            else:
+                st.warning("Not enough reviews for topic modeling")
+
+# ============================================================
+# PAGE 4: STREAMING SIMULATION (COMPLETELY REDESIGNED)
+# ============================================================
+elif page == "📡 Streaming Simulation":
+    st.title("📡 Real-Time Spark Streaming Analytics")
+    
+    import subprocess
+    import glob
+    import time as time_module
+    from streamlit.components.v1 import html
+    import shutil
+    
+    # Paths
+    STREAM_INPUT = "data/stream_input"
+    OUTPUT_CSV = "data/output_csv"
+    OUTPUT_PARQUET = "data/output_parquet"
+    
+    # Initialize session state with proper defaults
+    if "spark_process" not in st.session_state:
+        st.session_state.spark_process = None
+    if "feeder_process" not in st.session_state:
+        st.session_state.feeder_process = None
+    if "streaming_active" not in st.session_state:
+        st.session_state.streaming_active = False
+    if "auto_refresh" not in st.session_state:
+        st.session_state.auto_refresh = False
+    if "refresh_interval" not in st.session_state:
+        st.session_state.refresh_interval = 60  # Default to 1 minute
+    if "last_action" not in st.session_state:
+        st.session_state.last_action = None
+    if "action_timestamp" not in st.session_state:
+        st.session_state.action_timestamp = None
+    if "processed_data_cache" not in st.session_state:
+        st.session_state.processed_data_cache = None
+    if "data_source" not in st.session_state:
+        st.session_state.data_source = "batch"  # 'spark' or 'batch'
+    
+    # ============================================================
+    # HELPER FUNCTIONS (COMPLETELY REWRITTEN)
+    # ============================================================
+    
+    def read_spark_output():
+        """Read data from Spark streaming output (parquet/csv)"""
+        all_data = []
+        source = None
+        
+        # Try Parquet first - look for spark_batch_*.parquet files (new format from spark_streaming.py)
+        if os.path.exists(OUTPUT_PARQUET):
+            # New batch format: spark_batch_N.parquet
+            batch_parquet_files = glob.glob(os.path.join(OUTPUT_PARQUET, "spark_batch_*.parquet"))
+            for f in batch_parquet_files:
+                try:
+                    temp_df = pd.read_parquet(f)
+                    if len(temp_df) > 0:
+                        all_data.append(temp_df)
+                        source = "spark_parquet"
+                except Exception as e:
+                    pass
+            
+            # Also try old format: batch_*.parquet (without spark_ prefix)
+            if not all_data:
+                batch_parquet_files = glob.glob(os.path.join(OUTPUT_PARQUET, "batch_*.parquet"))
+                for f in batch_parquet_files:
+                    try:
+                        temp_df = pd.read_parquet(f)
+                        if len(temp_df) > 0:
+                            all_data.append(temp_df)
+                            source = "spark_parquet"
+                    except:
+                        pass
+            
+            # Also try part-* files from old Spark output
+            if not all_data:
+                parquet_files = glob.glob(os.path.join(OUTPUT_PARQUET, "part-*.parquet"))
+                parquet_files += glob.glob(os.path.join(OUTPUT_PARQUET, "*.snappy.parquet"))
+                for f in parquet_files:
+                    if not os.path.basename(f).startswith('.'):
+                        try:
+                            temp_df = pd.read_parquet(f)
+                            if len(temp_df) > 0:
+                                all_data.append(temp_df)
+                                source = "spark_parquet"
+                        except:
+                            pass
+        
+        # Try CSV output - look for spark_batch_*.csv files (new format)
+        if not all_data and os.path.exists(OUTPUT_CSV):
+            # New batch format: spark_batch_N.csv
+            batch_csv_files = glob.glob(os.path.join(OUTPUT_CSV, "spark_batch_*.csv"))
+            for f in batch_csv_files:
+                try:
+                    temp_df = pd.read_csv(f, on_bad_lines='skip')
+                    if len(temp_df) > 0:
+                        all_data.append(temp_df)
+                        source = "spark_csv"
+                except:
+                    pass
+            
+            # Also try old format: batch_*.csv (without spark_ prefix)
+            if not all_data:
+                batch_csv_files = glob.glob(os.path.join(OUTPUT_CSV, "batch_*.csv"))
+                for f in batch_csv_files:
+                    try:
+                        temp_df = pd.read_csv(f, on_bad_lines='skip')
+                        if len(temp_df) > 0:
+                            all_data.append(temp_df)
+                            source = "spark_csv"
+                    except:
+                        pass
+            
+            # Also try part-* files from old Spark output
+            if not all_data:
+                csv_files = glob.glob(os.path.join(OUTPUT_CSV, "part-*.csv"))
+                for f in csv_files:
+                    if not os.path.basename(f).startswith('.'):
+                        try:
+                            temp_df = pd.read_csv(f, header=None, 
+                                                 names=["product_id", "rating", "review_text", "sentiment"],
+                                                 on_bad_lines='skip')
+                            if len(temp_df) > 0:
+                                all_data.append(temp_df)
+                                source = "spark_csv"
+                        except:
+                            pass
+        
+        if all_data:
+            result = pd.concat(all_data, ignore_index=True)
+            # Normalize column names
+            if 'rating' in result.columns:
+                result['rating'] = pd.to_numeric(result['rating'], errors='coerce')
+                result = result.dropna(subset=['rating'])
+            return result, source
+        
+        return None, None
+    
+    def read_batch_input_data(max_batches=100, max_reviews_per_batch=None):
+        """Read data directly from batch input files and apply sentiment analysis"""
+        if not os.path.exists(STREAM_INPUT):
+            return None, 0
+        
+        batch_files = sorted(glob.glob(os.path.join(STREAM_INPUT, "batch_*.txt")))
+        total_batches = len(batch_files)
+        
+        # Limit batches for performance
+        batch_files = batch_files[:max_batches]
+        
+        records = []
+        batches_read = 0
+        
+        for f in batch_files:
+            try:
+                batch_num = int(os.path.basename(f).replace("batch_", "").replace(".txt", ""))
+                with open(f, 'r', encoding='utf-8', errors='ignore') as file:
+                    reviews_in_batch = 0
+                    for line in file:
+                        parts = line.strip().split('|')
+                        if len(parts) >= 3:
+                            product_id = parts[0].strip()
+                            try:
+                                rating = int(float(parts[1].strip()))
+                                rating = max(1, min(5, rating))  # Clamp to 1-5
+                            except:
+                                rating = 3
+                            review = '|'.join(parts[2:]).strip()
+                            
+                            # Apply sentiment analysis
+                            review_lower = review.lower()
+                            pos_words = ["good", "great", "excellent", "love", "amazing", "awesome", 
+                                        "fantastic", "best", "perfect", "wonderful", "happy", "satisfied"]
+                            neg_words = ["bad", "terrible", "worst", "hate", "awful", "poor", 
+                                        "horrible", "broken", "waste", "disappointed", "useless"]
+                            
+                            pos_count = sum(1 for w in pos_words if w in review_lower)
+                            neg_count = sum(1 for w in neg_words if w in review_lower)
+                            
+                            if pos_count > neg_count:
+                                sentiment = "positive"
+                            elif neg_count > pos_count:
+                                sentiment = "negative"
+                            else:
+                                sentiment = "neutral"
+                            
+                            records.append({
+                                "product_id": product_id,
+                                "rating": rating,
+                                "review_text": review[:300],  # Truncate for display
+                                "sentiment": sentiment,
+                                "batch_number": batch_num,
+                                "pos_words": pos_count,
+                                "neg_words": neg_count
+                            })
+                            reviews_in_batch += 1
+                            
+                            if max_reviews_per_batch and reviews_in_batch >= max_reviews_per_batch:
+                                break
+                batches_read += 1
+            except Exception as e:
+                continue
+        
+        if records:
+            result = pd.DataFrame(records)
+            result['rating'] = pd.to_numeric(result['rating'], errors='coerce')
+            result = result.dropna(subset=['rating'])
+            result['rating'] = result['rating'].astype(int)
+            return result, total_batches
+        
+        return None, total_batches
+    
+    def count_input_batches():
+        if os.path.exists(STREAM_INPUT):
+            return len([f for f in os.listdir(STREAM_INPUT) if f.endswith(".txt")])
+        return 0
+    
+    def get_spark_output_stats():
+        """Get detailed statistics about Spark output files"""
+        stats = {
+            "parquet_files": 0,
+            "parquet_data_files": 0,
+            "csv_files": 0,
+            "csv_data_files": 0,
+            "has_checkpoint": False,
+            "has_spark_metadata": False,
+            "total_size_mb": 0
+        }
+        
+        if os.path.exists(OUTPUT_PARQUET):
+            all_files = os.listdir(OUTPUT_PARQUET)
+            stats["parquet_files"] = len([f for f in all_files if f.endswith('.parquet') or f.endswith('.crc')])
+            stats["parquet_data_files"] = len([f for f in all_files if f.endswith('.parquet') and not f.startswith('.')])
+            stats["has_checkpoint"] = os.path.exists(os.path.join(OUTPUT_PARQUET, "_checkpoint"))
+            stats["has_spark_metadata"] = os.path.exists(os.path.join(OUTPUT_PARQUET, "_spark_metadata"))
+        
+        if os.path.exists(OUTPUT_CSV):
+            all_files = os.listdir(OUTPUT_CSV)
+            stats["csv_files"] = len([f for f in all_files if f.endswith('.csv') or f.endswith('.crc')])
+            stats["csv_data_files"] = len([f for f in all_files if f.endswith('.csv') and not f.startswith('.')])
+        
+        return stats
+    
+    def check_process_alive(proc):
+        if proc is None:
+            return False
+        return proc.poll() is None
+    
+    def clear_checkpoints():
+        """Clear Spark checkpoints to allow reprocessing"""
+        cleared = []
+        for folder in [OUTPUT_CSV + "_checkpoint", OUTPUT_PARQUET + "_checkpoint",
+                      os.path.join(OUTPUT_CSV, "_checkpoint"), os.path.join(OUTPUT_PARQUET, "_checkpoint")]:
+            if os.path.exists(folder):
+                try:
+                    shutil.rmtree(folder, ignore_errors=True)
+                    cleared.append(folder)
+                except:
+                    pass
+        return cleared
+
+    def check_process_alive(proc):
+        if proc is None:
+            return False
+        return proc.poll() is None
+    
+    # ============================================================
+    # HEADER WITH STATUS BADGE & LAST ACTION
+    # ============================================================
+    header_col1, header_col2, header_col3 = st.columns([2, 1, 1])
+    with header_col1:
+        if st.session_state.streaming_active and check_process_alive(st.session_state.spark_process):
+            st.markdown("""
+            <div style="background: linear-gradient(90deg, #00c853, #69f0ae); padding: 12px 24px; border-radius: 12px; display: inline-block; box-shadow: 0 4px 6px rgba(0,200,83,0.3);">
+                <span style="color: white; font-weight: bold; font-size: 18px;">🟢 LIVE - Spark Streaming Active</span>
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.markdown("""
+            <div style="background: linear-gradient(90deg, #667eea, #764ba2); padding: 12px 24px; border-radius: 12px; display: inline-block; box-shadow: 0 4px 6px rgba(102,126,234,0.3);">
+                <span style="color: white; font-weight: bold; font-size: 18px;">📊 Batch Data Analysis Mode</span>
+            </div>
+            """, unsafe_allow_html=True)
+    
+    with header_col2:
+        st.markdown(f"**🕐 Last Updated:**")
+        st.markdown(f"**{datetime.now().strftime('%H:%M:%S')}**")
+    
+    with header_col3:
+        if st.session_state.last_action:
+            st.markdown(f"**📌 Last Action:**")
+            st.markdown(f"*{st.session_state.last_action}*")
+    
+    st.markdown("---")
+    
+    # ============================================================
+    # CONTROL PANEL - REDESIGNED
+    # ============================================================
+    st.markdown("### ⚡ Streaming Control Panel")
+    
+    ctrl_col1, ctrl_col2, ctrl_col3, ctrl_col4 = st.columns([1.5, 1.5, 1, 1.5])
+    
+    with ctrl_col1:
+        start_btn = st.button("▶️ Start Streaming", type="primary", use_container_width=True, 
+                     disabled=st.session_state.streaming_active,
+                     help="Start Spark streaming & review feeder processes")
+        if start_btn:
+            st.session_state.last_action = f"Started streaming at {datetime.now().strftime('%H:%M:%S')}"
+            st.session_state.action_timestamp = datetime.now()
+            try:
+                with st.spinner("🚀 Starting Spark Streaming Pipeline..."):
+                    # Clear checkpoints for fresh processing
+                    cleared = clear_checkpoints()
+                    
+                    # Start feeder process
+                    st.session_state.feeder_process = subprocess.Popen(
+                        ["python", "scripts/amazon_review_feeder.py"],
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == 'nt' else 0
+                    )
+                    time_module.sleep(2)
+                    
+                    # Start Spark streaming process
+                    st.session_state.spark_process = subprocess.Popen(
+                        ["python", "scripts/spark_streaming.py"],
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == 'nt' else 0
+                    )
+                    st.session_state.streaming_active = True
+                st.toast("✅ Spark Streaming Started Successfully!", icon="🚀")
+                st.rerun()
+            except Exception as e:
+                st.error(f"❌ Failed to start streaming: {e}")
+    
+    with ctrl_col2:
+        stop_btn = st.button("⏹️ Stop Streaming", use_container_width=True,
+                     disabled=not st.session_state.streaming_active,
+                     help="Stop all streaming processes")
+        if stop_btn:
+            st.session_state.last_action = f"Stopped streaming at {datetime.now().strftime('%H:%M:%S')}"
+            try:
+                if st.session_state.spark_process:
+                    st.session_state.spark_process.terminate()
+                if st.session_state.feeder_process:
+                    st.session_state.feeder_process.terminate()
+                st.session_state.streaming_active = False
+                st.session_state.spark_process = None
+                st.session_state.feeder_process = None
+                st.toast("⏹️ Streaming Stopped", icon="🛑")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Error stopping: {e}")
+    
+    with ctrl_col3:
+        refresh_btn = st.button("🔄 Refresh", use_container_width=True, help="Refresh data now")
+        if refresh_btn:
+            st.session_state.last_action = f"Manual refresh at {datetime.now().strftime('%H:%M:%S')}"
+            st.session_state.processed_data_cache = None  # Clear cache
+            st.rerun()
+    
+    with ctrl_col4:
+        clear_btn = st.button("🗑️ Clear Checkpoints", use_container_width=True, 
+                             help="Clear Spark checkpoints to allow reprocessing")
+        if clear_btn:
+            cleared = clear_checkpoints()
+            st.session_state.last_action = f"Cleared {len(cleared)} checkpoint folders"
+            st.toast(f"🗑️ Cleared {len(cleared)} checkpoint folders", icon="✅")
+            st.rerun()
+    
+    # Auto-refresh controls - NOW IN MINUTES
+    st.markdown("#### ⏱️ Auto-Refresh Settings")
+    auto_col1, auto_col2, auto_col3 = st.columns([1, 2, 2])
+    
+    with auto_col1:
+        auto_refresh = st.toggle("Enable Auto-Refresh", value=st.session_state.auto_refresh)
+        if auto_refresh != st.session_state.auto_refresh:
+            st.session_state.auto_refresh = auto_refresh
+            st.session_state.last_action = f"Auto-refresh {'enabled' if auto_refresh else 'disabled'}"
+            st.rerun()
+    
+    with auto_col2:
+        # Intervals in MINUTES: 1, 2, 5, 10 minutes
+        interval_options = {
+            "1 minute": 60,
+            "2 minutes": 120,
+            "5 minutes": 300,
+            "10 minutes": 600
+        }
+        interval_labels = list(interval_options.keys())
+        interval_values = list(interval_options.values())
+        
+        # Find current index
+        try:
+            current_idx = interval_values.index(st.session_state.refresh_interval)
+        except ValueError:
+            current_idx = 0  # Default to 1 minute
+        
+        selected_interval = st.selectbox(
+            "Refresh Interval",
+            options=interval_labels,
+            index=current_idx,
+            help="How often to automatically refresh the data"
+        )
+        new_interval = interval_options[selected_interval]
+        if new_interval != st.session_state.refresh_interval:
+            st.session_state.refresh_interval = new_interval
+            st.session_state.last_action = f"Changed refresh interval to {selected_interval}"
+            st.rerun()
+    
+    with auto_col3:
+        if st.session_state.auto_refresh:
+            mins = st.session_state.refresh_interval // 60
+            st.success(f"🔄 **Auto-refresh ON** - Refreshing every **{mins} minute{'s' if mins > 1 else ''}**")
+        else:
+            st.info("🔄 Auto-refresh is OFF - Click 'Refresh' to update manually")
+    
+    st.markdown("---")
+    
+    # ============================================================
+    # DATA LOADING - WITH CLEAR SOURCE INDICATION
+    # ============================================================
+    
+    # Try Spark output first
+    spark_data, spark_source = read_spark_output()
+    spark_stats = get_spark_output_stats()
+    
+    # Always load batch data as primary source
+    batch_data, total_batches = read_batch_input_data(max_batches=150)
+    
+    # Determine which data to display
+    if spark_data is not None and len(spark_data) > 0:
+        display_data = spark_data
+        data_source_name = f"Spark Output ({spark_source})"
+        data_source_icon = "⚡"
+    elif batch_data is not None and len(batch_data) > 0:
+        display_data = batch_data
+        data_source_name = "Batch Input Files (with sentiment analysis)"
+        data_source_icon = "📦"
+    else:
+        display_data = None
+        data_source_name = "No Data"
+        data_source_icon = "❌"
+    
+    # ============================================================
+    # SYSTEM STATUS & STATISTICS
+    # ============================================================
+    st.markdown("### 📊 System Status & Live Statistics")
+    
+    # Top-level metrics
+    m1, m2, m3, m4, m5 = st.columns(5)
+    
+    input_batches = count_input_batches()
+    total_processed = len(display_data) if display_data is not None else 0
+    estimated_input_reviews = input_batches * 1000  # ~1000 reviews per batch
+    
+    with m1:
+        st.markdown("""
+        <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 15px; border-radius: 12px; text-align: center;">
+            <p style="color: white; margin: 0; font-size: 12px;">📦 INPUT BATCHES</p>
+            <h2 style="color: white; margin: 5px 0;">{:,}</h2>
+        </div>
+        """.format(input_batches), unsafe_allow_html=True)
+    
+    with m2:
+        st.markdown("""
+        <div style="background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); padding: 15px; border-radius: 12px; text-align: center;">
+            <p style="color: white; margin: 0; font-size: 12px;">✅ DISPLAYED</p>
+            <h2 style="color: white; margin: 5px 0;">{:,}</h2>
+        </div>
+        """.format(total_processed), unsafe_allow_html=True)
+    
+    with m3:
+        st.markdown("""
+        <div style="background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%); padding: 15px; border-radius: 12px; text-align: center;">
+            <p style="color: white; margin: 0; font-size: 12px;">📥 EST. TOTAL</p>
+            <h2 style="color: white; margin: 5px 0;">{:,}</h2>
+        </div>
+        """.format(estimated_input_reviews), unsafe_allow_html=True)
+    
+    with m4:
+        spark_files = spark_stats["parquet_data_files"] + spark_stats["csv_data_files"]
+        st.markdown("""
+        <div style="background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%); padding: 15px; border-radius: 12px; text-align: center;">
+            <p style="color: white; margin: 0; font-size: 12px;">⚡ SPARK FILES</p>
+            <h2 style="color: white; margin: 5px 0;">{}</h2>
+        </div>
+        """.format(spark_files), unsafe_allow_html=True)
+    
+    with m5:
+        st.markdown("""
+        <div style="background: linear-gradient(135deg, #ff9966 0%, #ff5e62 100%); padding: 15px; border-radius: 12px; text-align: center;">
+            <p style="color: white; margin: 0; font-size: 12px;">{} SOURCE</p>
+            <h2 style="color: white; margin: 5px 0; font-size: 14px;">{}</h2>
+        </div>
+        """.format(data_source_icon, data_source_name.split('(')[0].strip()), unsafe_allow_html=True)
+    
+    st.markdown("")
+    
+    # ============================================================
+    # SPARK VS BATCH DATA STATUS - DETAILED COMPARISON
+    # ============================================================
+    with st.expander("🔍 **Data Source Details & Pipeline Status**", expanded=True):
+        status_col1, status_col2 = st.columns(2)
+        
+        with status_col1:
+            st.markdown("#### 📦 Batch Input Files")
+            st.markdown(f"**Location:** `{STREAM_INPUT}/`")
+            st.markdown(f"**Total Batch Files:** {input_batches:,}")
+            st.markdown(f"**Estimated Reviews:** {estimated_input_reviews:,}")
+            
+            if batch_data is not None:
+                st.success(f"✅ Successfully loaded {len(batch_data):,} reviews from batch files")
+                st.markdown(f"**Unique Products:** {batch_data['product_id'].nunique():,}")
+                st.markdown(f"**Average Rating:** {batch_data['rating'].mean():.2f} ⭐")
+            else:
+                st.warning("⚠️ No batch data available")
+        
+        with status_col2:
+            st.markdown("#### ⚡ Spark Streaming Output")
+            st.markdown(f"**Parquet Location:** `{OUTPUT_PARQUET}/`")
+            st.markdown(f"**CSV Location:** `{OUTPUT_CSV}/`")
+            
+            st.markdown(f"**Parquet Data Files:** {spark_stats['parquet_data_files']}")
+            st.markdown(f"**CSV Data Files:** {spark_stats['csv_data_files']}")
+            st.markdown(f"**Has Checkpoint:** {'✅ Yes' if spark_stats['has_checkpoint'] else '❌ No'}")
+            
+            if spark_data is not None and len(spark_data) > 0:
+                st.success(f"✅ Spark output has {len(spark_data):,} processed reviews")
+            else:
+                st.warning("""
+                ⚠️ **No Spark output data found**  
+                This could be because:
+                - Spark streaming hasn't been started yet
+                - Checkpoints are blocking reprocessing
+                - Output files are only CRC checksums
+                
+                **Solution:** Click '🗑️ Clear Checkpoints' then '▶️ Start Streaming'
+                """)
+    
+    st.markdown("---")
+    
+    # ============================================================
+    # SENTIMENT ANALYSIS RESULTS - MAIN DATA DISPLAY
+    # ============================================================
+    if display_data is not None and len(display_data) > 0:
+        st.markdown(f"### 📈 Streaming Data Analysis ({data_source_icon} {data_source_name})")
+        
+        sentiment_counts = display_data["sentiment"].value_counts()
+        pos_count = sentiment_counts.get("positive", 0)
+        neg_count = sentiment_counts.get("negative", 0)
+        neu_count = sentiment_counts.get("neutral", 0)
+        
+        pos_pct = (pos_count / total_processed * 100) if total_processed > 0 else 0
+        neg_pct = (neg_count / total_processed * 100) if total_processed > 0 else 0
+        neu_pct = (neu_count / total_processed * 100) if total_processed > 0 else 0
+        
+        # Sentiment progress bars with better styling
+        st.markdown("#### 😊 Sentiment Distribution")
+        sent_col1, sent_col2, sent_col3 = st.columns(3)
+        
+        with sent_col1:
+            st.markdown("**😊 Positive Reviews**")
+            st.progress(pos_pct / 100)
+            st.markdown(f"**{pos_count:,}** reviews ({pos_pct:.1f}%)")
+        
+        with sent_col2:
+            st.markdown("**😐 Neutral Reviews**")
+            st.progress(neu_pct / 100)
+            st.markdown(f"**{neu_count:,}** reviews ({neu_pct:.1f}%)")
+        
+        with sent_col3:
+            st.markdown("**😞 Negative Reviews**")
+            st.progress(neg_pct / 100)
+            st.markdown(f"**{neg_count:,}** reviews ({neg_pct:.1f}%)")
+        
+        st.markdown("")
+        
+        # Charts side by side
+        chart_col1, chart_col2 = st.columns(2)
+        
+        with chart_col1:
+            # Donut chart for sentiment
+            fig_donut = go.Figure(data=[go.Pie(
+                labels=["Positive", "Neutral", "Negative"],
+                values=[pos_count, neu_count, neg_count],
+                hole=0.6,
+                marker_colors=["#2ecc71", "#95a5a6", "#e74c3c"],
+                textinfo="percent+label",
+                textfont_size=14
+            )])
+            fig_donut.update_layout(
+                title=dict(text="Sentiment Distribution", font=dict(size=18)),
+                showlegend=True,
+                legend=dict(orientation="h", yanchor="bottom", y=-0.2),
+                height=400,
+                annotations=[dict(text=f"<b>{total_processed:,}</b><br>Reviews", 
+                                 x=0.5, y=0.5, font_size=16, showarrow=False)]
+            )
+            st.plotly_chart(fig_donut, use_container_width=True)
+        
+        with chart_col2:
+            # Rating bar chart
+            rating_counts = display_data["rating"].value_counts().sort_index()
+            colors = ["#e74c3c", "#e67e22", "#f39c12", "#27ae60", "#2ecc71"]
+            
+            fig_rating = go.Figure(data=[go.Bar(
+                x=[f"⭐ {i}" for i in rating_counts.index],
+                y=rating_counts.values,
+                marker_color=colors[:len(rating_counts)],
+                text=rating_counts.values,
+                textposition="outside",
+                textfont_size=12
+            )])
+            fig_rating.update_layout(
+                title=dict(text="Star Rating Distribution", font=dict(size=18)),
+                xaxis_title="Rating",
+                yaxis_title="Number of Reviews",
+                height=400,
+                showlegend=False
+            )
+            st.plotly_chart(fig_rating, use_container_width=True)
+        
+        st.markdown("---")
+        
+        # ============================================================
+        # DETAILED DATA TABLES & ANALYSIS
+        # ============================================================
+        st.markdown("### 📋 Detailed Data Analysis")
+        
+        tab1, tab2, tab3, tab4 = st.tabs(["📊 Summary Stats", "📝 Review Samples", "🏆 Top Products", "📈 Batch Analysis"])
+        
+        with tab1:
+            # Summary statistics
+            sum_col1, sum_col2 = st.columns(2)
+            
+            with sum_col1:
+                st.markdown("#### 📈 Key Performance Metrics")
+                metrics_df = pd.DataFrame({
+                    "Metric": [
+                        "Total Reviews Analyzed",
+                        "Unique Products",
+                        "Average Rating",
+                        "Positive Rate",
+                        "Negative Rate",
+                        "Neutral Rate",
+                        "Data Source"
+                    ],
+                    "Value": [
+                        f"{total_processed:,}",
+                        f"{display_data['product_id'].nunique():,}",
+                        f"{display_data['rating'].mean():.2f} ⭐",
+                        f"{pos_pct:.1f}%",
+                        f"{neg_pct:.1f}%",
+                        f"{neu_pct:.1f}%",
+                        data_source_name
+                    ]
+                })
+                st.dataframe(metrics_df, use_container_width=True, hide_index=True)
+            
+            with sum_col2:
+                st.markdown("#### 📊 Rating × Sentiment Cross-Tab")
+                rating_sentiment = display_data.groupby(["rating", "sentiment"]).size().unstack(fill_value=0)
+                
+                # Display without gradient (matplotlib not installed)
+                st.dataframe(rating_sentiment, use_container_width=True)
+        
+        with tab2:
+            st.markdown("#### 📝 Sample Reviews from Stream")
+            
+            # Show different sentiment samples
+            sample_type = st.radio("Filter by Sentiment:", ["All", "Positive", "Negative", "Neutral"], horizontal=True)
+            
+            if sample_type != "All":
+                filtered_reviews = display_data[display_data["sentiment"] == sample_type.lower()]
+            else:
+                filtered_reviews = display_data
+            
+            # Take a sample
+            sample_size = min(20, len(filtered_reviews))
+            recent_df = filtered_reviews.sample(n=sample_size, random_state=42) if len(filtered_reviews) >= sample_size else filtered_reviews
+            
+            display_cols = ["product_id", "rating", "sentiment", "review_text"]
+            if "batch_number" in recent_df.columns:
+                display_cols.insert(0, "batch_number")
+            
+            recent_display = recent_df[display_cols].copy()
+            recent_display["review_text"] = recent_display["review_text"].apply(
+                lambda x: str(x)[:100] + "..." if len(str(x)) > 100 else str(x)
+            )
+            
+            # Rename columns for display
+            col_rename = {
+                "product_id": "Product ID",
+                "rating": "Rating ⭐",
+                "sentiment": "Sentiment",
+                "review_text": "Review Preview",
+                "batch_number": "Batch #"
+            }
+            recent_display = recent_display.rename(columns=col_rename)
+            
+            # Color sentiment
+            def color_sentiment(val):
+                colors = {
+                    "positive": "background-color: #d4edda; color: #155724;",
+                    "negative": "background-color: #f8d7da; color: #721c24;",
+                    "neutral": "background-color: #fff3cd; color: #856404;"
+                }
+                return colors.get(val, "")
+            
+            st.dataframe(
+                recent_display.style.map(color_sentiment, subset=["Sentiment"]),
+                use_container_width=True, 
+                hide_index=True,
+                height=400
+            )
+        
+        with tab3:
+            st.markdown("#### 🏆 Top 10 Products by Review Count")
+            
+            top_products = display_data.groupby("product_id").agg(
+                reviews=("product_id", "count"),
+                avg_rating=("rating", "mean"),
+                positive_pct=("sentiment", lambda x: (x == "positive").sum() / len(x) * 100),
+                negative_pct=("sentiment", lambda x: (x == "negative").sum() / len(x) * 100)
+            ).sort_values("reviews", ascending=False).head(10).reset_index()
+            
+            top_products.columns = ["Product ID", "Total Reviews", "Avg Rating", "Positive %", "Negative %"]
+            top_products["Avg Rating"] = top_products["Avg Rating"].round(2)
+            top_products["Positive %"] = top_products["Positive %"].round(1)
+            top_products["Negative %"] = top_products["Negative %"].round(1)
+            top_products.insert(0, "Rank", range(1, len(top_products) + 1))
+            
+            st.dataframe(top_products, use_container_width=True, hide_index=True)
+            
+            # Visualization
+            if len(top_products) > 0:
+                fig_top = px.bar(
+                    top_products.head(5), 
+                    x="Product ID", 
+                    y="Total Reviews",
+                    color="Positive %", 
+                    color_continuous_scale="RdYlGn",
+                    title="Top 5 Most Reviewed Products",
+                    text="Total Reviews"
+                )
+                fig_top.update_traces(textposition="outside")
+                fig_top.update_layout(height=350)
+                st.plotly_chart(fig_top, use_container_width=True)
+        
+        with tab4:
+            st.markdown("#### 📈 Batch-wise Analysis")
+            
+            if "batch_number" in display_data.columns:
+                batch_stats = display_data.groupby("batch_number").agg(
+                    reviews=("product_id", "count"),
+                    avg_rating=("rating", "mean"),
+                    pos_pct=("sentiment", lambda x: (x == "positive").sum() / len(x) * 100)
+                ).reset_index()
+                batch_stats.columns = ["Batch", "Reviews", "Avg Rating", "Positive %"]
+                
+                # Line chart for batch trends
+                fig_batch = go.Figure()
+                fig_batch.add_trace(go.Scatter(
+                    x=batch_stats["Batch"], y=batch_stats["Avg Rating"],
+                    mode="lines+markers", name="Avg Rating",
+                    line=dict(color="#667eea", width=2)
+                ))
+                fig_batch.add_trace(go.Scatter(
+                    x=batch_stats["Batch"], y=batch_stats["Positive %"] / 20,  # Scale to fit
+                    mode="lines+markers", name="Positive % (scaled)",
+                    line=dict(color="#2ecc71", width=2, dash="dash")
+                ))
+                fig_batch.update_layout(
+                    title="Batch-wise Metrics Trend",
+                    xaxis_title="Batch Number",
+                    yaxis_title="Value",
+                    height=350
+                )
+                st.plotly_chart(fig_batch, use_container_width=True)
+                
+                st.dataframe(batch_stats, use_container_width=True, hide_index=True, height=300)
+            else:
+                st.info("Batch information not available for Spark output data")
+    
+    else:
+        # No data state
+        st.markdown("---")
+        st.markdown("### ⚠️ No Data Available")
+        
+        st.warning("""
+        **No streaming data to display yet.**  
+        
+        This could be because:
+        1. Spark streaming hasn't processed any files yet
+        2. Batch input files are empty
+        3. Checkpoints are blocking reprocessing
+        """)
+        
+        if input_batches > 0:
+            st.success(f"✅ Found **{input_batches:,}** batch files with approximately **{estimated_input_reviews:,}** reviews available!")
+            st.info("💡 **Try:** Click '🗑️ Clear Checkpoints' then '🔄 Refresh' to load batch data")
+        else:
+            st.error("❌ No batch input files found in `data/stream_input/`")
+            st.info("💡 **Run:** `python scripts/amazon_review_feeder.py` to create batch files")
+    
+    # ============================================================
+    # AUTO-REFRESH IMPLEMENTATION - Using streamlit-autorefresh
+    # ============================================================
+    if st.session_state.auto_refresh:
+        from streamlit_autorefresh import st_autorefresh
+        
+        refresh_sec = st.session_state.refresh_interval
+        mins = refresh_sec // 60
+        secs = refresh_sec % 60
+        
+        st.markdown("---")
+        st.markdown(f"""
+        <div style="background: linear-gradient(90deg, #667eea, #764ba2); padding: 15px 25px; border-radius: 12px; text-align: center; margin: 10px 0;">
+            <span style="color: white; font-size: 16px;">⏱️ Auto-refresh active • Refreshing every {mins}m {secs}s</span>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Non-blocking auto-refresh using streamlit-autorefresh component
+        # This component handles the refresh internally without full page reload
+        count = st_autorefresh(interval=refresh_sec * 1000, limit=None, key="streaming_autorefresh")
+        
+        if count > 0:
+            st.session_state.last_action = f"Auto-refreshed at {datetime.now().strftime('%H:%M:%S')} (#{count})"
 
 # -----------------------------------------------------------
-# Visualization 3: Category Trend (Optional)
+# Footer
 # -----------------------------------------------------------
-st.markdown("### 📆 Review Trend Over Time (Category-Level)")
-monthly_trend = df.groupby(df["review_date"].dt.to_period("M")).size().reset_index(name="Review Count")
-monthly_trend["review_date"] = monthly_trend["review_date"].astype(str)
-fig_trend = px.line(
-    monthly_trend,
-    x="review_date",
-    y="Review Count",
-    title=f"Monthly Review Trend for {selected_category if selected_category != 'All' else 'All Categories'}",
-)
-st.plotly_chart(fig_trend, use_container_width=True)
-
-# -----------------------------------------------------------
-# Data Sample
-# -----------------------------------------------------------
-with st.expander("🧾 View Product Worthiness Data"):
-    st.dataframe(product_summary.head(15))
+st.sidebar.markdown("---")
+st.sidebar.markdown("**Amazon Reviews Analytics**")
+st.sidebar.markdown("Built with Streamlit, Spark & ML")
+st.sidebar.markdown("---")
+st.sidebar.markdown("**📦 ML Models:**")
+st.sidebar.markdown(f"- Sentiment: {'✅' if 'sentiment_model' in ml_models else '❌'}")
+st.sidebar.markdown(f"- Rating: {'✅' if 'rating_model' in ml_models else '❌'}")
+st.sidebar.markdown("- Rule-Based: ✅")
+st.sidebar.markdown("- Topic (LDA): ✅")

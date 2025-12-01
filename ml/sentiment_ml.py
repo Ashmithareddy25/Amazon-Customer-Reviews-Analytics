@@ -6,16 +6,25 @@ from sklearn.metrics import classification_report, accuracy_score, confusion_mat
 import re
 import joblib
 
-print("\n📥 Loading dataset...")
+print("\n📥 Loading dataset (sampling 50k rows for speed)...")
 
-# FIX FOR PARSER ERROR + ENCODING
-df = pd.read_csv("data/processed/cleaned_reviews.csv", 
-                 engine="python", 
-                 encoding="utf-8", 
-                 on_bad_lines="skip")
+# FAST LOADING: Only read needed columns and limit rows
+df = pd.read_csv(
+    "data/processed/cleaned_reviews.csv", 
+    usecols=['review_body', 'star_rating'],
+    nrows=100000,  # Read only 100k rows (will sample 50k)
+    encoding="utf-8",
+    on_bad_lines="skip"
+)
+
+print(f"📊 Loaded {len(df)} rows")
 
 # Keep needed columns
 df = df[['review_body', 'star_rating']].dropna()
+
+# Convert star_rating to numeric
+df['star_rating'] = pd.to_numeric(df['star_rating'], errors='coerce')
+df = df.dropna()
 
 # Label sentiment
 def label_sentiment(rating):
