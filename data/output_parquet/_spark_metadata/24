@@ -1,2 +1,3 @@
-v1
-{"path":"file:///C:/Users/saiha/Desktop/Cloud_Project_Final/Amazon-Customer-Reviews-Analytics/data/output_parquet/part-00000-a2d0421b-ef23-4199-b814-ebde90d78783-c000.snappy.parquet","size":98917,"isDir":false,"modificationTime":1763434015207,"blockReplication":1,"blockSize":33554432,"action":"add"}
+version https://git-lfs.github.com/spec/v1
+oid sha256:93d0b4638e5bcdb98ceaec96c3bf97a075750981073bf0fb1779c27387c66cf5
+size 303

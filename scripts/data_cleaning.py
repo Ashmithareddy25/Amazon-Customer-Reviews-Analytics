@@ -2,63 +2,89 @@ import pandas as pd
 import glob
 import os
 
-RAW_PATH = "data/raw/*.tsv"
+RAW_DIR = "data/raw"
 OUTPUT_PATH = "data/processed/cleaned_reviews.csv"
 
-# Limit number of files to process (set to None for all files)
-MAX_FILES = 5  # Process only first 5 files to avoid memory issues
+MAX_FILES = None  # process all files
+
+def load_file(file_path, chunk_size=25000):
+    """Load CSV, TSV (chunked) or Parquet (full)."""
+    if file_path.endswith(".parquet"):
+        print(f"📥 Loading Parquet file: {file_path}")
+        df = pd.read_parquet(file_path)
+        return [df]  # return list for consistency
+
+    if file_path.endswith(".csv"):
+        print(f"📥 Loading CSV file in chunks: {file_path}")
+        return pd.read_csv(
+            file_path,
+            chunksize=chunk_size,
+            dtype=str,
+            on_bad_lines="skip",
+            encoding="utf-8",
+            encoding_errors="replace"
+        )
+
+    if file_path.endswith(".tsv"):
+        print(f"📥 Loading TSV file in chunks: {file_path}")
+        return pd.read_csv(
+            file_path,
+            sep="\t",
+            chunksize=chunk_size,
+            dtype=str,
+            on_bad_lines="skip",
+            encoding="utf-8",
+            encoding_errors="replace"
+        )
+
+    raise ValueError(f"❌ Unsupported file format: {file_path}")
 
 def clean_data():
-    print("\n🚀 Starting STREAMING cleaning (write chunks directly to disk)...")
+    print("\n🚀 Starting data cleaning ...")
 
-    files = glob.glob(RAW_PATH)
+    # List only valid data files (skip .gitkeep and hidden files)
+    files = [
+    os.path.join(RAW_DIR, f)
+    for f in os.listdir(RAW_DIR)
+    if not f.startswith(".")  # ignore .gitkeep and hidden files
+       and (f.endswith(".parquet") or f.endswith(".csv") or f.endswith(".tsv"))
+       ]
+
     if MAX_FILES:
         files = files[:MAX_FILES]
-    print(f"📂 Processing {len(files)} raw files.\n")
+    print(f"📂 Found {len(files)} raw files.\n")
 
-    CHUNK_SIZE = 25000  # Smaller chunks for memory efficiency
     os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
-
     first_write = True
     total_rows = 0
 
     for file in files:
-        print(f"📥 Processing file in chunks: {file}")
+        loaders = load_file(file)
 
-        try:
-            for chunk in pd.read_csv(
-                file,
-                sep="\t",
-                chunksize=CHUNK_SIZE,
-                dtype=str,
-                on_bad_lines="skip",
-                encoding="utf-8",
-                encoding_errors="replace"
-            ):
-                # Convert numeric column safely
+        for chunk in loaders:
+            # Clean columns
+            if "star_rating" in chunk.columns:
                 chunk["star_rating"] = pd.to_numeric(chunk["star_rating"], errors="coerce")
 
-                # Clean date column
+            if "review_date" in chunk.columns:
                 chunk["review_date"] = pd.to_datetime(chunk["review_date"], errors="coerce")
 
-                # Drop rows with invalid values
-                chunk = chunk.dropna(subset=["star_rating", "review_body"])
+            # Drop invalid rows
+            valid_cols = [col for col in ["star_rating", "review_body"] if col in chunk.columns]
+            chunk = chunk.dropna(subset=valid_cols)
 
-                # Write to CSV (append mode after first write)
-                chunk.to_csv(
-                    OUTPUT_PATH,
-                    mode='w' if first_write else 'a',
-                    header=first_write,
-                    index=False
-                )
-                first_write = False
-                total_rows += len(chunk)
+            # Write to cleaned CSV
+            chunk.to_csv(
+                OUTPUT_PATH,
+                mode='w' if first_write else 'a',
+                header=first_write,
+                index=False
+            )
 
-        except Exception as e:
-            print(f"⚠️ Error processing {file}: {e}")
-            continue
+            first_write = False
+            total_rows += len(chunk)
 
-    print("\n🎉 Streaming cleaning finished!")
+    print("\n🎉 Cleaning finished!")
     print(f"📁 Saved → {OUTPUT_PATH}")
     print(f"📊 Total rows → {total_rows:,}")
 

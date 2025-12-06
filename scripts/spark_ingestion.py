@@ -32,17 +32,17 @@ df.show(5, truncate=False)
 # ------------------------------------------------------------------
 print("\n🔧 Cleaning and fixing review_date column...")
 
-# Convert to proper date type, invalid = NULL
 df = df.withColumn(
     "review_date_parsed",
     F.to_date("review_date", "yyyy-MM-dd")
 )
 
-# Remove invalid or missing dates
 df = df.filter(df.review_date_parsed.isNotNull())
 
 print(f"📊 Valid rows after date fix: {df.count()}")
 
+# Add review_length column early
+df = df.withColumn("review_length", F.length(F.col("review_body")))
 df.createOrReplaceTempView("reviews")
 
 # ------------------------------------------------------------------
@@ -60,7 +60,6 @@ monthly = spark.sql("""
 """)
 
 monthly.show(20)
-
 monthly.write.mode("overwrite").csv("data/processed/spark_output/monthly_reviews")
 print("✔ Saved → monthly_reviews")
 
@@ -74,48 +73,45 @@ avg_ratings = df.groupBy("product_id") \
     .orderBy(F.col("avg_rating").desc())
 
 avg_ratings.show(20)
-
 avg_ratings.write.mode("overwrite").csv("data/processed/spark_output/avg_ratings")
 print("✔ Saved → avg_ratings")
 
 # ------------------------------------------------------------------
-# 6. REVIEW LENGTH VS. RATING ANALYSIS
+# 6. REVIEW LENGTH VS RATING
 # ------------------------------------------------------------------
 print("\n📝 Generating Review Length Analysis...")
-
-df = df.withColumn("review_length", F.length(F.col("review_body")))
 
 review_length_stats = df.groupBy("star_rating") \
     .agg(
         F.avg("review_length").alias("avg_review_length"),
         F.max("review_length").alias("max_review_length"),
         F.min("review_length").alias("min_review_length")
-    ) \
-    .orderBy("star_rating")
+    ).orderBy("star_rating")
 
 review_length_stats.show()
-
 review_length_stats.write.mode("overwrite").csv("data/processed/spark_output/review_length_stats")
 print("✔ Saved → review_length_stats")
 
 # ------------------------------------------------------------------
-# 7. COMPLEX QUERY EXAMPLE
+# 7. COMPLEX QUERY (REPLACED helpful_votes QUERY)
 # ------------------------------------------------------------------
-print("\n🧠 Running complex SQL query (Top Helpful Reviews by Product)...")
+print("\n🧠 Extracting Top Longest Reviews (instead of helpful reviews)...")
 
-df.createOrReplaceTempView("reviews")
-
-top_helpful = spark.sql("""
-    SELECT product_id, review_id, helpful_votes, star_rating, review_body
+top_reviews = spark.sql("""
+    SELECT 
+        product_id,
+        product_title,
+        review_body,
+        star_rating,
+        review_length
     FROM reviews
-    WHERE helpful_votes > 20
-    ORDER BY helpful_votes DESC
+    ORDER BY review_length DESC
+    LIMIT 20
 """)
 
-top_helpful.show(20)
-
-top_helpful.write.mode("overwrite").csv("data/processed/spark_output/top_helpful_reviews")
-print("✔ Saved → top_helpful_reviews")
+top_reviews.show(20)
+top_reviews.write.mode("overwrite").csv("data/processed/spark_output/top_longest_reviews")
+print("✔ Saved → top_longest_reviews")
 
 # ------------------------------------------------------------------
 # 8. DONE

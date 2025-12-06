@@ -1,2 +1,3 @@
-v1
-{"path":"file:///C:/Users/saiha/Desktop/Cloud_Project_Final/Amazon-Customer-Reviews-Analytics/data/stream_input/test1.txt","timestamp":1763431819896,"batchId":0}
+version https://git-lfs.github.com/spec/v1
+oid sha256:302b6c620e0b44d65b64115e2c0d14809aa5557595f535658fdf48c4be0450d3
+size 164

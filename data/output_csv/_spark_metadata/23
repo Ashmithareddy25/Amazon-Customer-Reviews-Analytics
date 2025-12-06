@@ -1,2 +1,3 @@
-v1
-{"path":"file:///C:/Users/saiha/Desktop/Cloud_Project_Final/Amazon-Customer-Reviews-Analytics/data/output_csv/part-00000-c58bcb3d-9b03-4ced-a90e-62274069ebd6-c000.csv","size":170150,"isDir":false,"modificationTime":1763434013002,"blockReplication":1,"blockSize":33554432,"action":"add"}
+version https://git-lfs.github.com/spec/v1
+oid sha256:0392e52d730af268605a81437c62b92421058d2e41f8d67b9e623bdf54dc0266
+size 289
