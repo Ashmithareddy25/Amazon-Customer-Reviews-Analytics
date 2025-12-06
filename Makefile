@@ -1,5 +1,7 @@
 # Makefile for Amazon Customer Reviews Analytics Project
 
+.PHONY: all data analysis models worthiness dashboard clean
+
 all: data analysis models worthiness
 
 data:
@@ -15,6 +17,9 @@ models:
 
 worthiness:
 	spark-submit scripts/product_worthiness.py
+
+dashboard:
+	streamlit run dashboard/app.py
 
 clean:
 	rm -rf data/processed/*
