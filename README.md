@@ -40,6 +40,17 @@ The project uses a structured Parquet dataset containing more than **50,000+ Ama
 - `product_category`
 
 ---
+🎯 3. Features & Goals
+
+Primary objectives of this project:
+
+✅ Clean and preprocess Amazon reviews
+✅ Visualize rating distributions
+✅ Conduct sentiment analysis to classify reviews as positive/negative
+✅ Extract common themes and keywords from the text
+✅ Build simple ML/NLP models for sentiment prediction
+✅ Provide clear visual insights and dashboards
+---
 
 ### **🏗️ Architecture**
 
