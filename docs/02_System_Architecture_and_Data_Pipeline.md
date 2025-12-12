@@ -1,24 +1,44 @@
 # System Architecture and Data Pipeline
 
-## High-Level Architecture
-The project follows a modular and layered architecture where each stage of the pipeline performs a specific responsibility. This design improves scalability, clarity, and maintainability.
+## 🏗️ High-Level System Architecture
+The project follows a **layered and modular architecture**, ensuring scalability, clarity, and separation of concerns.
 
-### Architecture Overview
+### Architecture Layers
+1. Data Source Layer
+2. Ingestion & Processing Layer
+3. Machine Learning Layer
+4. Storage Layer
+5. Visualization Layer
+
+## 🧱 Architecture Diagram
+
 ![System Architecture](images/system_architecture.png)
 
 > The diagram illustrates the flow from raw review data ingestion through Spark-based processing, machine learning models, and final visualization.
 
-## Data Ingestion
-The raw dataset consists of Amazon customer reviews stored in Parquet format. Due to cost constraints and limited access to real-time review APIs, the project adopts a batch ingestion strategy. File-based ingestion is also used to simulate streaming behavior.
 
-## Processing Framework
-Apache Spark is used for large-scale data processing. Spark enables efficient handling of large datasets and supports distributed transformations required for cleaning and feature engineering.
+## 🔄 Data Flow Description
 
-## Pipeline Workflow
-1. Raw review data is loaded from Parquet files
-2. Spark cleans and preprocesses the data
-3. Cleaned data is stored in structured CSV format
-4. Machine learning models consume the processed data
-5. Analytical insights are visualized using Streamlit
+| Stage | Technology | Description |
+|-----|------------|-------------|
+| Data Source | Parquet Files | Amazon review dataset |
+| Processing | Apache Spark | Cleaning & transformation |
+| Feature Engineering | TF-IDF | Text vectorization |
+| ML Models | Scikit-learn | Sentiment, Rating, Topics |
+| Storage | CSV / PKL | Processed data & models |
+| Visualization | Streamlit | Interactive dashboard |
 
-This pipeline represents a complete analytical workflow rather than isolated exploratory analysis.
+## 📥 Data Ingestion Strategy
+Due to the absence of free real-time Amazon review APIs and high costs of cloud streaming services, **batch ingestion** was adopted.
+
+Additionally, **file-based streaming simulation** was implemented to demonstrate near-real-time behavior using incremental batch files.
+
+This design choice was **approved by the instructor** and aligns with practical constraints.
+
+## ⚙️ Why Apache Spark?
+Apache Spark enables:
+- Distributed data processing
+- Efficient handling of large datasets
+- Scalable transformations and filtering
+
+It forms the backbone of the analytics pipeline.
