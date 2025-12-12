@@ -25,16 +25,27 @@ All execution steps, scripts, and dependencies are documented in the repository 
 
 Real-time streaming ingestion was initially explored. However, the following constraints influenced the final design:
 
-- No freely available real-time Amazon review APIs
-- Cloud-based streaming services (AWS, Kafka, etc.) incur high costs
-- Budget constraints prevented continuous live ingestion
+- No freely available real-time Amazon review APIs  
+- Cloud-based streaming services (AWS, Kafka, etc.) incur high costs  
+- Budget constraints prevented continuous live ingestion  
 
 Based on instructor guidance, **batch processing with file-based streaming simulation** was adopted as a practical and acceptable alternative.
 
 This approach still demonstrates:
-- Incremental data ingestion
-- Scalable processing logic
-- Near-real-time analytical workflows
+- Incremental data ingestion  
+- Scalable processing logic  
+- Near-real-time analytical workflows  
+
+### 📊 Architecture Comparison Diagram
+
+<p align="center">
+  <img src="images/batch_vs_streaming.png"
+       alt="Batch vs Streaming Architecture Comparison"
+       width="650"/>
+</p>
+
+**Figure Description:**  
+The diagram compares the originally planned real-time streaming architecture with the implemented batch processing approach. Due to cost and API availability constraints, batch ingestion using Parquet and file-based streaming simulation was adopted while still preserving scalability and analytical depth.
 
 ---
 
@@ -42,10 +53,10 @@ This approach still demonstrates:
 
 While the project meets its objectives, the following limitations are acknowledged:
 
-- Lack of true real-time data ingestion
-- Use of sampled datasets for faster experimentation
-- Classical ML models instead of deep learning approaches
-- Local execution instead of full cloud deployment
+- Lack of true real-time data ingestion  
+- Use of sampled datasets for faster experimentation  
+- Classical ML models instead of deep learning approaches  
+- Local execution instead of full cloud deployment  
 
 These limitations were necessary trade-offs to balance feasibility, cost, and academic scope.
 
