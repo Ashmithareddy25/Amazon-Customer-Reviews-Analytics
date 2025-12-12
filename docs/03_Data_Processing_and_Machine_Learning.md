@@ -19,7 +19,8 @@ Text data is converted into numerical features using **TF-IDF vectorization**, w
 
 The diagram below illustrates how raw customer review text is transformed into numerical features using TF-IDF vectorization and then consumed by multiple machine learning models for different analytical tasks.
 
-![TF-IDF and ML Pipeline](images/tfidf_ml_pipeline.png)
+<img src="images/tfidf_ml_pipeline.png" alt="TF-IDF and ML Pipeline" width="600"/>
+
 
 **Figure Description:**  
 Raw customer review text is first cleaned and normalized. The processed text is then converted into numerical representations using TF-IDF vectorization. These TF-IDF features are shared across multiple machine learning models, including Logistic Regression for sentiment classification, Linear Regression for rating prediction, and Latent Dirichlet Allocation (LDA) for topic modeling.
