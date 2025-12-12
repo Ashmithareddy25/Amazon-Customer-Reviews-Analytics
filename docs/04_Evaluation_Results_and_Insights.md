@@ -23,9 +23,6 @@ The sentiment analysis model was evaluated using a held-out test dataset and sta
 
 The model performs particularly well in identifying **positive sentiment**, which aligns with the natural distribution of customer reviews where positive feedback is more frequent.
 
-<p align="center">
-  <img src="images/confusion_matrix.png" alt="Sentiment Confusion Matrix" width="600"/>
-</p>
 
 **Insight:**  
 The confusion matrix shows strong classification for positive reviews, while neutral sentiment remains harder to classify due to overlap in language usage.
@@ -62,10 +59,6 @@ Latent Dirichlet Allocation (LDA) was used to uncover hidden topics across custo
 - Shipping experience and delivery speed
 - Pricing and value for money
 - Customer satisfaction and complaints
-
-<p align="center">
-  <img src="images/lda_topics.png" alt="LDA Topics" width="600"/>
-</p>
 
 **Insight:**  
 Topic modeling enables summarization of thousands of reviews into interpretable themes, helping businesses identify common strengths and recurring issues without manual review.
